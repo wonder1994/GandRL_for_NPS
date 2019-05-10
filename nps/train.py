@@ -20,8 +20,14 @@ from nps.reinforce import EnvironmentClasses, RewardCombinationFun
 from nps.training_functions import (do_supervised_minibatch,
                                     do_syntax_weighted_minibatch,
                                     do_rl_minibatch,
+                                    get_self_critic_loss,
                                     do_rl_minibatch_two_steps,
-                                    do_beam_rl)
+                                    get_rf_demean_loss,
+                                    do_beam_rl,
+                                    get_mct_loss,
+                                    get_arm_loss,
+                                    get_ar_loss,
+                                    get_adaptive_arm_loss)
 from nps.evaluate import evaluate_model
 from syntax.checker import PySyntaxChecker
 from karel.consistency import Simulator
@@ -31,7 +37,7 @@ class TrainSignal(object):
     RL = "rl"
     BEAM_RL = "beam_rl"
 
-signals = ["supervised", "rl", "beam_rl"]
+signals = ["supervised", "rl", "beam_rl", 'arm','ada_arm', 'sc', 'rf_demean','ar', 'mct']
 
 def add_train_cli_args(parser):
     train_group = parser.add_argument_group("Training",
@@ -115,6 +121,14 @@ def add_train_cli_args(parser):
                           default=2,
                           help="Size of the batch on expanded candidates")
     rl_group.add_argument('--rl_use_ref', action="store_true")
+    rl_group.add_argument('--arm_sample', type=str,
+                          default='greedy')
+    rl_group.add_argument('--decay_factor', type=float, default=1.0)
+    rl_group.add_argument('--logits_factor', type=float, default=0.0)
+    rl_group.add_argument('--learning_rate_decay_start', type=float, default=0.0)
+    rl_group.add_argument('--learning_rate_decay_rate', type=float, default=1)
+    rl_group.add_argument('--learning_rate_decay_every', type=float, default=1)
+
 
 def train_seq2seq_model(
         # Optimization
@@ -132,7 +146,8 @@ def train_seq2seq_model(
         # Where to write results
         result_folder, args_dict,
         # Run options
-        use_cuda, log_frequency):
+        use_cuda, log_frequency, arm_sample, decay_factor, logits_factor, learning_rate_decay_start,
+        learning_rate_decay_rate, learning_rate_decay_every):
 
     #############################
     # Admin / Bookkeeping stuff #
@@ -219,7 +234,8 @@ def train_seq2seq_model(
         weight_mask[tgt_pad] = 0
         # Setup the criterion
         loss_criterion = nn.CrossEntropyLoss(weight=weight_mask)
-    elif signal == TrainSignal.RL or signal == TrainSignal.BEAM_RL:
+    elif signal == TrainSignal.RL or signal == TrainSignal.BEAM_RL or signal == 'arm' or signal == 'sc' \
+            or signal == 'rf_demean' or signal == 'ada_arm' or signal == 'ar' or signal == 'mct' :
         simulator = Simulator(vocab["idx2tkn"])
 
         if signal == TrainSignal.BEAM_RL:
@@ -236,7 +252,8 @@ def train_seq2seq_model(
     optimizer_cls = getattr(optim, optim_alg)
     optimizer = optimizer_cls(model.parameters(),
                               lr=learning_rate)
-
+    first_order = 0
+    second_order = 0
     #####################
     # ################# #
     # # Training Loop # #
@@ -246,6 +263,14 @@ def train_seq2seq_model(
     recent_losses = []
     best_val_acc = np.NINF
     for epoch_idx in range(0, nb_epochs):
+        if epoch_idx > learning_rate_decay_start:
+            frac = (epoch_idx - learning_rate_decay_start) // learning_rate_decay_every
+            decay_factor = learning_rate_decay_rate ** frac
+            current_lr = learning_rate * decay_factor
+        else:
+            current_lr = learning_rate
+        set_lr(optimizer, current_lr)
+
         nb_ios_for_epoch = nb_ios
         # This is definitely not the most efficient way to do it but oh well
         dataset = shuffle_dataset(dataset, batch_size)
@@ -275,7 +300,8 @@ def train_seq2seq_model(
                                                              in_tgt_seq, in_tgt_seq_list,
                                                              out_tgt_seq, loss_criterion)
                 recent_losses.append(minibatch_loss)
-            elif signal == TrainSignal.RL or signal == TrainSignal.BEAM_RL:
+            elif signal == TrainSignal.RL or signal == TrainSignal.BEAM_RL or signal == 'arm' or signal == 'sc'\
+                    or signal == 'rf_demean' or signal == 'ada_arm' or signal == 'ar' or signal == 'mct':
                 inp_grids, out_grids, \
                     _, _, _, \
                     inp_worlds, out_worlds, \
@@ -288,14 +314,26 @@ def train_seq2seq_model(
                 # We use 1/nb_rollouts as the reward to normalize wrt the
                 # size of the rollouts
                 if signal == TrainSignal.RL:
-                    reward_norm = 1 / float(nb_rollouts)
+                    reward_norm = 1 / float(nb_rollouts) #TODO: why?
                 elif signal == TrainSignal.BEAM_RL:
+                    reward_norm = 1
+                elif signal == 'arm':
+                    reward_norm = 1
+                elif signal == 'sc':
+                    reward_norm = 1
+                elif signal == 'rf_demean':
+                    reward_norm = 1
+                elif signal == 'ada_arm':
+                    reward_norm = 1
+                elif signal == 'ar':
+                    reward_norm = 1
+                elif signal == 'mct':
                     reward_norm = 1
                 else:
                     raise NotImplementedError("Unknown training signal")
 
                 lens = [len(target) for target in targets]
-                max_len = max(lens) + 10
+                max_len = max(lens) + 10 #TODO: smaller?
                 env_cls = EnvironmentClasses[environment]
                 if "Consistency" in environment:
                     envs = [env_cls(reward_norm, trg_prog, sp_inp_worlds, sp_out_worlds, simulator)
@@ -326,9 +364,53 @@ def train_seq2seq_model(
                                                   envs, reward_comb_fun,
                                                   tgt_start, tgt_end, tgt_pad,
                                                   max_len, rl_beam, rl_inner_batch, rl_use_ref)
+                elif signal == 'arm':
+                    minibatch_reward = get_arm_loss(model,
+                                                  inp_grids, out_grids,
+                                                  envs,
+                                                  tgt_start, tgt_end,
+                                                  max_len, arm_sample, decay_factor, logits_factor)
+                elif signal == 'ada_arm':
+                    minibatch_reward = get_adaptive_arm_loss(model,
+                                                  inp_grids, out_grids,
+                                                  envs,
+                                                  tgt_start, tgt_end,
+                                                  max_len, arm_sample, decay_factor, logits_factor)
+                elif signal == 'sc':
+                    minibatch_reward = get_self_critic_loss(model,
+                                                  inp_grids, out_grids,
+                                                  envs,
+                                                  tgt_start, tgt_end,
+                                                  max_len, arm_sample)
+                elif signal == 'rf_demean':
+                    minibatch_reward = get_rf_demean_loss(model,
+                                                            inp_grids, out_grids,
+                                                            envs,
+                                                            tgt_start, tgt_end,
+                                                            max_len, arm_sample)
+                elif signal == 'ar':
+                    minibatch_reward = get_ar_loss(model,
+                                                          inp_grids, out_grids,
+                                                          envs,
+                                                          tgt_start, tgt_end,
+                                                          max_len, arm_sample)
+                elif signal == 'mct':
+                    minibatch_reward = get_mct_loss(model,
+                                                          inp_grids, out_grids,
+                                                          envs,
+                                                          tgt_start, tgt_end,
+                                                          max_len, arm_sample)
                 else:
                     raise NotImplementedError("Unknown Environment type")
                 recent_losses.append(minibatch_reward)
+                gradient = torch.zeros([0]).cuda()
+                for i in model.parameters():
+                    gradient = torch.cat((gradient, i.grad.view(-1)), 0)
+                first_order = 0.9 * first_order + 0.1 * gradient
+                second_order = 0.9 * second_order + 0.1 * gradient.pow(2)
+                variance = torch.mean(torch.abs(second_order - first_order.pow(2))).item()
+                print(variance)
+                print(minibatch_reward)
             else:
                 raise NotImplementedError("Unknown Training method")
             optimizer.step()
@@ -376,10 +458,12 @@ def train_seq2seq_model(
             # Evaluate the model on the validation set
             out_path = str(result_dir / ("eval/epoch_%d/val_.txt" % epoch_idx))
             val_acc = evaluate_model(str(path_to_weight_dump), vocab_file,
-                                     val_file, 5, 0, use_grammar,
-                                     out_path, 100, 50, batch_size,
+                                     val_file, 5, 0, use_grammar, #TODO
+                                     out_path, 1, 1, 16,
                                      use_cuda, False)
             logging.info("Epoch : %d ValidationAccuracy : %f." % (epoch_idx, val_acc))
+            print("Epoch : %d ValidationAccuracy : %f." % (epoch_idx, val_acc))
+            print(result_dir)
             if val_acc > best_val_acc:
                 logging.info("Epoch : %d ValidationBest : %f." % (epoch_idx, val_acc))
                 best_val_acc = val_acc
@@ -391,3 +475,8 @@ def train_seq2seq_model(
                     torch.save(model, weight_file)
                     if use_cuda:
                         model.cuda()
+
+
+def set_lr(optimizer, lr):
+    for group in optimizer.param_groups:
+        group['lr'] = lr

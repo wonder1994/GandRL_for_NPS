@@ -29,4 +29,7 @@ train_seq2seq_model(args.signal, args.nb_ios, args.nb_epochs, args.optim_alg,
 
                     args.result_folder, vars(args),
 
-                    args.use_cuda, args.log_frequency)
+                    args.use_cuda, args.log_frequency, args.arm_sample, args.decay_factor, args.logits_factor,
+                    args.learning_rate_decay_start,
+                    args.learning_rate_decay_rate, args.learning_rate_decay_every
+                    )

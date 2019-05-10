@@ -207,6 +207,9 @@ class MultiIO01(Environment):
             # crashed. Ignore it.
             return 0
         rew = 0
+        # trace_num = []
+        # for i in trace:
+        #     trace_num.append(i.item())
         parse_success, cand_prog = self.simulator.get_prog_ast(trace)
         if not parse_success:
             # Program is not syntactically correct

@@ -290,7 +290,7 @@ class World:
         heroCol = hero_pos_val[2] - 1
 
         # Get the position of the markers
-        markers = np.zeros((rows, cols))
+        markers = torch.zeros((rows, cols)).type_as(tensor)
         for nb_marker_m1, marker_map in enumerate(tensor[6:,1:rows+1, 1:cols+1]):
             markers += (nb_marker_m1+1) * marker_map
 

@@ -46,6 +46,7 @@ def load_input_file(path_to_dataset, path_to_vocab):
             srcs = []
             tgts = []
             current_ios = []
+            i = 0
             for sample_str in tqdm(dataset_file.readlines()):
                 sample_data = json.loads(sample_str)
 
@@ -75,6 +76,10 @@ def load_input_file(path_to_dataset, path_to_vocab):
                     out_grid = torch.ShortTensor(out_grid_coord)
 
                     current_ios.append((inp_grid, out_grid))
+
+                i += 1
+                if i > 10000:
+                    break
 
                 srcs.append(current_ios)
                 tgts.append(tgt_program_idces)
